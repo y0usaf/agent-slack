@@ -1,40 +1,32 @@
 import type { Command } from "commander";
 import type { CliContext } from "./context.ts";
-import { parseReminderDuration } from "../slack/later.ts";
-import {
-  addMessageTodo,
-  addTodo,
-  fetchTodos,
-  parseTodoTarget,
-  removeTodo,
-  setTodoCompleted,
-  setTodoReminder,
-  type TodoRef,
-  type TodoState,
-} from "../slack/todos.ts";
-import { parseSlackMessageUrl } from "../slack/url.ts";
-import { pruneEmpty } from "../lib/compact-json.ts";
+import { parseMsgTarget } from "./targets.ts";
 import type { SlackApiClient } from "../slack/client.ts";
+import { parseReminderDuration } from "../slack/later.ts";
+import { addTodo, listTodos, parseTodoTarget } from "../slack/todos.ts";
+import { pruneEmpty } from "../lib/compact-json.ts";
 import { getString } from "../lib/object-type-guards.ts";
 
-const WHEN_HELP =
+const WHEN =
   "30m, 1h, 3h, 2d, tomorrow, monday, or Unix timestamp; named days use this process's local timezone at 9:00";
-
-function parseState(value: string): TodoState {
-  const v = value.toLowerCase().trim();
-  if (v === "open" || v === "completed" || v === "all") {
-    return v;
-  }
-  throw new Error(`Invalid state: "${value}". Use open, completed, or all.`);
-}
+const WORKSPACE = "Workspace URL (defaults to your configured workspace)";
 
 export function registerTodoCommand(input: { program: Command; ctx: CliContext }): void {
   const { ctx } = input;
-
-  async function run<T>(
+  const act =
+    <A extends unknown[]>(work: (...args: A) => Promise<unknown>) =>
+    (...args: A) =>
+      work(...args).then(
+        (out) => console.log(JSON.stringify(pruneEmpty(out), null, 2)),
+        (err: unknown) => {
+          console.error(ctx.errorMessage(err));
+          process.exitCode = 1;
+        },
+      );
+  const withClient = <T>(
     workspace: string | undefined,
-    work: (client: SlackApiClient, workspaceUrl: string | undefined) => Promise<T>,
-  ): Promise<T> {
+    work: (client: SlackApiClient, workspaceUrl?: string) => Promise<T>,
+  ) => {
     const workspaceUrl = ctx.effectiveWorkspaceUrl(workspace);
     return ctx.withAutoRefresh({
       workspaceUrl,
@@ -43,130 +35,79 @@ export function registerTodoCommand(input: { program: Command; ctx: CliContext }
         return work(client, workspace_url);
       },
     });
-  }
+  };
 
-  function report(action: () => Promise<unknown>): Promise<void> {
-    return action().then(
-      (out) => console.log(JSON.stringify(pruneEmpty(out), null, 2)),
-      (err: unknown) => {
-        console.error(ctx.errorMessage(err));
-        process.exitCode = 1;
-      },
-    );
-  }
+  const todo = input.program.command("todo").description("Manage your Slack To-dos");
 
-  function workspaceOf(ref: TodoRef, workspace?: string): string | undefined {
-    return ref.itemType === "message" ? ref.workspaceUrl : workspace;
-  }
-
-  const todoCmd = input.program
-    .command("todo")
-    .description("Manage your Slack To-dos (personal to-do list)");
-
-  todoCmd
+  todo
     .command("list", { isDefault: true })
-    .description("List to-dos")
-    .option("--workspace <url>", "Workspace URL (defaults to your configured workspace)")
-    .option("--state <state>", "open (default), completed, or all", "open")
+    .description("List open to-dos")
+    .option("--all", "Include completed to-dos")
     .option("--limit <n>", "Max to-dos to show", "20")
+    .option("--cursor <cursor>", "next_cursor from a previous list")
     .option("--max-body-chars <n>", "Max message characters per to-do (-1 for unlimited)", "4000")
-    .action((options: { workspace?: string; state: string; limit: string; maxBodyChars: string }) =>
-      report(async () => {
-        const state = parseState(options.state);
-        return run(options.workspace, async (client, workspaceUrl) => {
-          const url = workspaceUrl ?? getString((await client.api("auth.test", {})).url);
-          if (!url) {
-            throw new Error("Could not determine the workspace URL; pass --workspace.");
-          }
-          return fetchTodos(client, {
-            workspaceUrl: url,
-            state,
-            limit: Number.parseInt(options.limit, 10),
-            maxBodyChars: Number.parseInt(options.maxBodyChars, 10),
-          });
-        });
-      }),
+    .option("--workspace <url>", WORKSPACE)
+    .action(
+      act(
+        (o: {
+          all?: boolean;
+          limit: string;
+          cursor?: string;
+          maxBodyChars: string;
+          workspace?: string;
+        }) =>
+          withClient(o.workspace, async (client, workspaceUrl) =>
+            listTodos(client, {
+              all: o.all,
+              cursor: o.cursor,
+              workspaceUrl: workspaceUrl ?? getString((await client.api("auth.test")).url) ?? "",
+              limit: Number(o.limit),
+              maxBodyChars: Number(o.maxBodyChars),
+            }),
+          ),
+      ),
     );
 
-  todoCmd
+  todo
     .command("add")
-    .description("Add a to-do; a Slack message URL adds that message instead of text")
-    .argument("<text>", "To-do text, or a Slack message URL")
-    .option("--remind <when>", `Set a reminder: ${WHEN_HELP}`)
-    .option("--workspace <url>", "Workspace URL (for text to-dos)")
-    .action((text: string, options: { remind?: string; workspace?: string }) =>
-      report(async () => {
-        const remindAt = options.remind ? parseReminderDuration(options.remind) : undefined;
-        let message;
-        try {
-          message = parseSlackMessageUrl(text.trim());
-        } catch {
-          message = undefined;
-        }
-        if (message) {
-          const ref = message;
-          await run(ref.workspace_url, (client) =>
-            addMessageTodo(client, { channelId: ref.channel_id, ts: ref.message_ts, remindAt }),
-          );
-          return { ok: true, id: text.trim(), remind_at: remindAt };
-        }
-        if (!text.trim()) {
-          throw new Error("To-do text is empty");
-        }
-        const id = await run(options.workspace, (client) =>
-          addTodo(client, { text: text.trim(), remindAt }),
+    .description("Add a to-do; a Slack message URL adds that message")
+    .argument("<text>", "To-do text or Slack message URL")
+    .option("--remind <when>", `Set a reminder: ${WHEN}`)
+    .option("--workspace <url>", WORKSPACE)
+    .action(
+      act(async (text: string, o: { remind?: string; workspace?: string }) => {
+        const message = parseMsgTarget(text).kind === "url" ? parseTodoTarget(text) : undefined;
+        const remind_at = o.remind ? parseReminderDuration(o.remind) : undefined;
+        const ref = await withClient(message?.workspaceUrl ?? o.workspace, (client) =>
+          addTodo(client, { item: message?.ref ?? text, remindAt: remind_at }),
         );
-        return { ok: true, id, remind_at: remindAt };
+        return { ok: true, id: message ? text : ref.item_id, remind_at };
       }),
     );
 
-  for (const [name, completed, description] of [
-    ["complete", true, "Mark a to-do as completed"],
-    ["reopen", false, "Move a completed to-do back to open"],
+  for (const [name, description, method, change] of [
+    ["complete", "Mark a to-do as completed", "saved.update", { mark: "completed" }],
+    ["reopen", "Move a completed to-do back to open", "saved.update", { mark: "uncompleted" }],
+    ["remind", "Set a reminder on a to-do", "saved.update", {}],
+    ["remove", "Delete a to-do", "saved.delete", {}],
   ] as const) {
-    todoCmd
+    const cmd = todo
       .command(name)
       .description(description)
       .argument("<target>", "To-do id (Sa...) or Slack message URL")
-      .option("--workspace <url>", "Workspace URL (for to-do ids)")
-      .action((target: string, options: { workspace?: string }) =>
-        report(async () => {
-          const ref = parseTodoTarget(target);
-          await run(workspaceOf(ref, options.workspace), (client) =>
-            setTodoCompleted(client, { ref, completed }),
-          );
-          return { ok: true };
-        }),
-      );
-  }
-
-  todoCmd
-    .command("remind")
-    .description("Set a reminder for a to-do")
-    .argument("<target>", "To-do id (Sa...) or Slack message URL")
-    .requiredOption("--in <when>", WHEN_HELP)
-    .option("--workspace <url>", "Workspace URL (for to-do ids)")
-    .action((target: string, options: { in: string; workspace?: string }) =>
-      report(async () => {
-        const ref = parseTodoTarget(target);
-        const remindAt = parseReminderDuration(options.in);
-        await run(workspaceOf(ref, options.workspace), (client) =>
-          setTodoReminder(client, { ref, remindAt }),
+      .option("--workspace <url>", WORKSPACE);
+    if (name === "remind") {
+      cmd.requiredOption("--in <when>", WHEN);
+    }
+    cmd.action(
+      act(async (target: string, o: { in?: string; workspace?: string }) => {
+        const { ref, workspaceUrl } = parseTodoTarget(target);
+        const remind_at = o.in ? parseReminderDuration(o.in) : undefined;
+        await withClient(workspaceUrl ?? o.workspace, (client) =>
+          client.apiMultipart(method, { ...ref, ...change, date_due: remind_at }),
         );
-        return { ok: true, remind_at: remindAt };
+        return { ok: true, remind_at };
       }),
     );
-
-  todoCmd
-    .command("remove")
-    .description("Delete a to-do")
-    .argument("<target>", "To-do id (Sa...) or Slack message URL")
-    .option("--workspace <url>", "Workspace URL (for to-do ids)")
-    .action((target: string, options: { workspace?: string }) =>
-      report(async () => {
-        const ref = parseTodoTarget(target);
-        await run(workspaceOf(ref, options.workspace), (client) => removeTodo(client, ref));
-        return { ok: true };
-      }),
-    );
+  }
 }

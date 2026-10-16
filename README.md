@@ -104,7 +104,7 @@ agent-slack
 │   ├── messages <query>
 │   └── files    <query>
 ├── todo
-│   ├── list                       # open to-dos (--state completed|all)
+│   ├── list                       # open to-dos (--all adds completed)
 │   ├── add <text-or-message-url>  # add a to-do (supports --remind)
 │   ├── complete <id-or-url>
 │   ├── reopen   <id-or-url>
@@ -573,26 +573,14 @@ Named reminder days such as `tomorrow` and `monday` mean 9:00 in the CLI process
 
 ### To-dos
 
-Manage Slack's To-dos list. A to-do is either plain text or a message; `todo list` returns an `id` for each (`Sa...` for text, the message URL for messages) that the other commands take:
+`todo list` shows open to-dos (`--all` adds completed ones). Each has an `id` the other commands take: `Sa...` for a text to-do, the message URL for a message. `--remind` and `--in` take the same values as `later remind --in`.
 
 ```bash
-# List open to-dos (--state completed or all for the rest)
-agent-slack todo list
-
-# Add a text to-do, optionally with a reminder
 agent-slack todo add "Review the launch plan" --remind tomorrow
-
-# Put a message on the list (moves it out of Saved if it was saved)
 agent-slack todo add "https://workspace.slack.com/archives/C123/p1700000000000000"
-
-# Complete, reopen, remind, or delete
 agent-slack todo complete Sa0123456789
-agent-slack todo reopen Sa0123456789
-agent-slack todo remind "https://workspace.slack.com/archives/C123/p1700000000000000" --in 3h
-agent-slack todo remove Sa0123456789
+agent-slack todo remind Sa0123456789 --in 3h
 ```
-
-Like `later`, these use Slack's internal `saved.*` endpoints, which may change without notice. `--remind` and `--in` take the same values as `later remind --in`.
 
 ### Create, edit, or fetch a Canvas as Markdown
 
