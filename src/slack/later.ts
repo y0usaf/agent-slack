@@ -109,76 +109,11 @@ export async function fetchLaterItems(
       const dateSaved = getNumber(item.date_created) ?? 0;
       const dateCompleted = getNumber(item.date_completed);
 
-      let channelName: string | undefined;
-      let message: LaterItem["message"];
-
-      // Resolve channel name
-      try {
-        const info = await client.api("conversations.info", {
-          channel: channelId,
-        });
-        const ch = isRecord(info.channel) ? info.channel : null;
-        if (ch) {
-          channelName = getString(ch.name) ?? getString(ch.name_normalized) ?? undefined;
-
-          // For DMs, resolve user display name
-          if (ch.is_im && !channelName) {
-            const userId = getString(ch.user);
-            if (userId) {
-              try {
-                const userInfo = await client.api("users.info", { user: userId });
-                const u = isRecord(userInfo.user) ? userInfo.user : null;
-                const profile = u && isRecord(u.profile) ? u.profile : null;
-                channelName =
-                  getString(profile?.display_name) ||
-                  getString(u?.real_name) ||
-                  getString(u?.name) ||
-                  undefined;
-              } catch {
-                // ignore
-              }
-            }
-          }
-        }
-      } catch {
-        // ignore
-      }
-
-      // Fetch the actual message
-      if (ts) {
-        try {
-          const history = await client.api("conversations.history", {
-            channel: channelId,
-            latest: ts,
-            inclusive: true,
-            limit: 1,
-          });
-          const msgs = asArray(history.messages).filter(isRecord);
-          const msg = msgs.find((m) => getString(m.ts) === ts);
-          if (msg) {
-            const rendered = renderSlackMessageContent(msg);
-            const content =
-              maxBodyChars >= 0 && rendered.length > maxBodyChars
-                ? `${rendered.slice(0, maxBodyChars)}\n…`
-                : rendered;
-
-            message = {
-              author:
-                getString(msg.user) || getString(msg.bot_id)
-                  ? {
-                      user_id: getString(msg.user) ?? undefined,
-                      bot_id: getString(msg.bot_id) ?? undefined,
-                    }
-                  : undefined,
-              content: content || undefined,
-              thread_ts: getString(msg.thread_ts) ?? undefined,
-              reply_count: getNumber(msg.reply_count) ?? undefined,
-            };
-          }
-        } catch {
-          // ignore — message may have been deleted
-        }
-      }
+      const { channelName, message } = await fetchSavedMessage(client, {
+        channelId,
+        ts,
+        maxBodyChars,
+      });
 
       return {
         channel_id: channelId,
@@ -193,6 +128,89 @@ export async function fetchLaterItems(
   );
 
   return result;
+}
+
+/**
+ * Resolve a saved message's channel name and fetch its rendered content.
+ * Missing channels or deleted messages leave the fields undefined.
+ */
+export async function fetchSavedMessage(
+  client: SlackApiClient,
+  input: { channelId: string; ts: string; maxBodyChars: number },
+): Promise<{ channelName?: string; message?: LaterItem["message"] }> {
+  const { channelId, ts, maxBodyChars } = input;
+  let channelName: string | undefined;
+  let message: LaterItem["message"];
+
+  // Resolve channel name
+  try {
+    const info = await client.api("conversations.info", {
+      channel: channelId,
+    });
+    const ch = isRecord(info.channel) ? info.channel : null;
+    if (ch) {
+      channelName = getString(ch.name) ?? getString(ch.name_normalized) ?? undefined;
+
+      // For DMs, resolve user display name
+      if (ch.is_im && !channelName) {
+        const userId = getString(ch.user);
+        if (userId) {
+          try {
+            const userInfo = await client.api("users.info", { user: userId });
+            const u = isRecord(userInfo.user) ? userInfo.user : null;
+            const profile = u && isRecord(u.profile) ? u.profile : null;
+            channelName =
+              getString(profile?.display_name) ||
+              getString(u?.real_name) ||
+              getString(u?.name) ||
+              undefined;
+          } catch {
+            // ignore
+          }
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  // Fetch the actual message
+  if (ts) {
+    try {
+      const history = await client.api("conversations.history", {
+        channel: channelId,
+        latest: ts,
+        inclusive: true,
+        limit: 1,
+      });
+      const msgs = asArray(history.messages).filter(isRecord);
+      const msg = msgs.find((m) => getString(m.ts) === ts);
+      if (msg) {
+        const rendered = renderSlackMessageContent(msg);
+        const content =
+          maxBodyChars >= 0 && rendered.length > maxBodyChars
+            ? `${rendered.slice(0, maxBodyChars)}\n…`
+            : rendered;
+
+        message = {
+          author:
+            getString(msg.user) || getString(msg.bot_id)
+              ? {
+                  user_id: getString(msg.user) ?? undefined,
+                  bot_id: getString(msg.bot_id) ?? undefined,
+                }
+              : undefined,
+          content: content || undefined,
+          thread_ts: getString(msg.thread_ts) ?? undefined,
+          reply_count: getNumber(msg.reply_count) ?? undefined,
+        };
+      }
+    } catch {
+      // ignore — message may have been deleted
+    }
+  }
+
+  return { channelName, message };
 }
 
 /**
